@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { FailureScenario } from '../lib/simulation-store';
+import { api } from '../lib/api';
 
 interface ChatMessage {
     id: string;
@@ -20,7 +21,16 @@ const Chatbot: React.FC<ChatbotProps> = ({ role = 'customer', activeScenario = '
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [isTyping, setIsTyping] = useState(false);
+    const [user, setUser] = useState<any>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    // 1. Load user context
+    useEffect(() => {
+        const storedUser = localStorage.getItem('cyber_user');
+        if (storedUser) {
+            setUser(JSON.parse(storedUser));
+        }
+    }, []);
 
     // Initialize welcome message based on role
     useEffect(() => {
@@ -49,6 +59,19 @@ const Chatbot: React.FC<ChatbotProps> = ({ role = 'customer', activeScenario = '
 
         // Different responses based on ROLE and SCENARIO
         if (role === 'customer') {
+            // First, try to get a real AI diagnosis for the scenario
+            try {
+                const email = user?.email || 'guest@example.com';
+                const diagPrompt = `I just encountered a ${scenario.replace(/_/g, ' ')} while shopping. What is happening?`;
+                const response = await api.chatWithMerchant(diagPrompt, 'Fashion Hub', email);
+                if (response && response.content) {
+                    await addMessage({ sender: 'agent', text: response.content, type: 'reasoning' });
+                    return;
+                }
+            } catch (e) {
+                console.warn("Backend diag failed, using fallback text", e);
+            }
+
             switch (scenario) {
                 case 'AUTH_FAILURE_API':
                     await addMessage({ sender: 'agent', text: 'Oops! I\'m having trouble loading the products. It looks like a connection issue on our end.' });
@@ -90,15 +113,36 @@ const Chatbot: React.FC<ChatbotProps> = ({ role = 'customer', activeScenario = '
         }
     };
 
-    // Handle User Input (Simulated Intelligence)
+    // Handle User Input (Simulated Intelligence + Backend API)
     const handleUserMessage = async (text: string) => {
         await addMessage({ sender: 'user', text }, 0);
+        setIsTyping(true);
 
+        try {
+            // Try Backend API First
+            let response;
+            const email = user?.email || (role === 'engineer' ? 'engineer@cybercypher.com' : 'guest@example.com');
+
+            if (role === 'engineer') {
+                response = await api.chatWithEngineer(text, email);
+            } else {
+                response = await api.chatWithMerchant(text, 'Fashion Hub', email);
+            }
+
+            if (response && response.content) {
+                await addMessage({ sender: 'agent', text: response.content }, 0);
+                setIsTyping(false);
+                return;
+            }
+        } catch (e) {
+            console.warn('Backend chat failed, falling back to local simulation', e);
+        }
+
+        // Fallback: Local Simulation Logic
         const lowerText = text.toLowerCase();
         let responseText = '';
         let responseType: ChatMessage['type'] | undefined;
 
-        setIsTyping(true);
         await wait(1000);
 
         if (role === 'engineer') {
@@ -177,8 +221,8 @@ const Chatbot: React.FC<ChatbotProps> = ({ role = 'customer', activeScenario = '
                         <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
                             <div
                                 className={`max-w-[85%] p-3 rounded-2xl text-sm ${msg.sender === 'user'
-                                        ? (role === 'engineer' ? 'bg-emerald-600 text-white rounded-br-none' : 'bg-indigo-600 text-white rounded-br-none')
-                                        : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
+                                    ? (role === 'engineer' ? 'bg-emerald-600 text-white rounded-br-none' : 'bg-indigo-600 text-white rounded-br-none')
+                                    : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
                                     }`}
                             >
                                 {msg.text}

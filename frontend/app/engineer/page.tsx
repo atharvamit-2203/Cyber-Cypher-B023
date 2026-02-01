@@ -3,6 +3,8 @@
 import React, { useState, useEffect } from 'react';
 import { mockSignals, mockTickets, mockReasonings, Ticket } from '../lib/mock-data';
 import { getSimulationState, initializeSimulation } from '../lib/simulation-store';
+import { api } from '../lib/api';
+import { useWebSocket } from '../hooks/useWebSocket';
 import AgentStatusPill from '../components/AgentStatusPill';
 import ConfidenceMeter from '../components/ConfidenceMeter';
 import RiskBadge from '../components/RiskBadge';
@@ -14,28 +16,100 @@ export default function EngineerDashboard() {
     const [tickets, setTickets] = useState<Ticket[]>(mockTickets);
     const [signals, setSignals] = useState(mockSignals);
     const [selectedActionId, setSelectedActionId] = useState<string | null>(null);
+    const [isBackendConnected, setIsBackendConnected] = useState(false);
+    const [user, setUser] = useState<any>(null);
 
-    // Poll for simulation updates
+    // Load user from localStorage
     useEffect(() => {
-        initializeSimulation();
+        const storedUser = localStorage.getItem('cyber_user');
+        if (storedUser) {
+            setUser(JSON.parse(storedUser));
+        }
+    }, []);
 
-        // Check for updates every second
-        const interval = setInterval(() => {
-            const state = getSimulationState();
-            if (state.tickets.length > tickets.length || state.signals.length > signals.length) {
-                setTickets(state.tickets);
-                setSignals(state.signals);
+    // 1. WebSocket Hook for Real-time Backend Updates
+    const { isConnected, lastMessage } = useWebSocket();
+
+    // 2. Poll Backend + Simulation State
+    useEffect(() => {
+        setIsBackendConnected(isConnected);
+
+        const fetchData = async () => {
+            if (isConnected) {
+                try {
+                    // If backend is live, fetch real tickets
+                    const realTickets = await api.getTickets() || [];
+                    // Simplify mapping for demo purposes 
+                    // (The backend Ticket shape might slightly differ, assuming compatibility or partial mapping)
+                    const mappedTickets = realTickets.map((t: any) => ({
+                        ...t,
+                        customerId: t.merchant_id || 'unknown',
+                        customerName: t.merchant_name || 'Unknown',
+                        agentStatus: t.status === 'open' ? 'reasoning' : 'completed', // basic mapping
+                        riskLevel: 'medium'
+                    }));
+
+                    // Merge with simulation tickets so we don't lose the "Storefront" demo data
+                    const simState = getSimulationState();
+                    setTickets([...mappedTickets, ...simState.tickets]);
+
+                    // For signals, we might just keep simulation or mix in
+                    if (lastMessage && lastMessage.type === 'agent_update') {
+                        // Backend pushed an update
+                        console.log('Backend Update:', lastMessage.data);
+                    }
+                } catch (e) {
+                    console.error("Backend fetch error", e);
+                }
+            } else {
+                // Fallback to Simulation Only
+                const state = getSimulationState();
+                if (state.tickets.length > tickets.length || state.signals.length > signals.length) {
+                    setTickets(state.tickets);
+                    setSignals(state.signals);
+                }
             }
-        }, 1000);
+        };
 
+        const interval = setInterval(fetchData, 2000);
         return () => clearInterval(interval);
-    }, [tickets.length, signals.length]);
+    }, [isConnected, lastMessage, tickets.length, signals.length]);
 
     const pendingTickets = tickets.filter(t => t.agentStatus === 'waiting_approval');
     const activeAgents = tickets.filter(t => ['reasoning', 'deciding', 'acting'].includes(t.agentStatus)).length;
 
-    const handleApproveAction = (ticketId: string, actionId: string) => {
-        // Simulate approval
+    const handleSimulateIssue = async () => {
+        if (!isBackendConnected) {
+            alert("Please start the backend server first!");
+            return;
+        }
+
+        try {
+            await api.simulateIssue({
+                merchant_id: "Fashion Hub",
+                type: "api",
+                description: "Critical Gateway Timeout detected during high-volume checkout"
+            });
+            // Also trigger a scan immediately for the demo
+            await api.triggerAgentScan();
+            alert("Simulated failure injected! AI is now analyzing...");
+        } catch (e) {
+            console.error("Simulation failed", e);
+            alert("Failed to inject simulation");
+        }
+    };
+
+    const handleApproveAction = async (ticketId: string, actionId: string) => {
+        if (isBackendConnected) {
+            try {
+                await api.approveAction(actionId);
+                alert("Action Approved on Backend!");
+            } catch (e) {
+                console.error("Approval failed", e);
+            }
+        }
+
+        // Optimistic UI update
         setTickets(prev => prev.map(t => {
             if (t.id === ticketId) {
                 return { ...t, agentStatus: 'acting', status: 'resolved' };
@@ -46,14 +120,14 @@ export default function EngineerDashboard() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-emerald-500/30">
+        <div className="min-h-screen text-slate-100 font-sans selection:bg-emerald-500/30">
 
             {/* Sidebar Navigation */}
-            <div className="fixed inset-y-0 left-0 w-64 bg-slate-900 border-r border-slate-800">
+            <div className="fixed inset-y-0 left-0 w-64 glass-panel border-r border-slate-700/50">
                 <div className="p-6">
                     <div className="flex items-center gap-3 mb-8">
-                        <span className="text-2xl">⚙️</span>
-                        <span className="font-bold text-lg tracking-tight">Engineer Console</span>
+                        <span className="text-2xl drop-shadow-[0_0_10px_rgba(52,211,153,0.5)]">⚙️</span>
+                        <span className="font-bold text-lg tracking-tight text-emerald-400">Engineer Console</span>
                     </div>
 
                     <nav className="space-y-1">
@@ -67,8 +141,8 @@ export default function EngineerDashboard() {
                                 key={item.id}
                                 onClick={() => setActiveTab(item.id as any)}
                                 className={`w-full flex items-center justify-between px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === item.id
-                                    ? 'bg-emerald-500/10 text-emerald-500 ring-1 ring-emerald-500/50'
-                                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800'
+                                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-[0_0_10px_rgba(52,211,153,0.2)]'
+                                    : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/50'
                                     }`}
                             >
                                 <div className="flex items-center gap-3">
@@ -85,14 +159,22 @@ export default function EngineerDashboard() {
                     </nav>
                 </div>
 
-                <div className="absolute bottom-0 left-0 right-0 p-6 border-t border-slate-800">
+                <div className="absolute bottom-0 left-0 right-0 p-6 border-t border-slate-700/50 space-y-4">
+                    <button
+                        onClick={handleSimulateIssue}
+                        className="w-full py-2 bg-red-500/10 hover:bg-red-500/20 text-red-500 text-xs font-bold rounded border border-red-500/30 transition-all flex items-center justify-center gap-2 group"
+                    >
+                        <span className="group-hover:animate-pulse">⚠️</span>
+                        Simulate Production Issue
+                    </button>
+
                     <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-xs font-bold border border-slate-700">
-                            E
+                        <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-500 flex items-center justify-center font-bold text-white shadow-lg shadow-emerald-500/20">
+                            {user?.name?.[0] || 'A'}
                         </div>
-                        <div className="flex-1 overflow-hidden">
-                            <div className="text-sm font-medium text-white truncate">DevOps Lead</div>
-                            <div className="text-xs text-slate-500 truncate">eng@cybercypher.com</div>
+                        <div>
+                            <div className="text-sm font-bold text-white">{user?.name || 'Atharva Amit'}</div>
+                            <div className="text-[10px] text-slate-500 uppercase tracking-widest">{user?.role || 'DevOps Lead'}</div>
                         </div>
                     </div>
                 </div>
@@ -117,7 +199,7 @@ export default function EngineerDashboard() {
                                 { label: 'Signals / Hour', value: '47', trend: 'Normal range', color: 'blue' },
                                 { label: 'Avg Confidence', value: '89%', trend: 'High stability', color: 'emerald' },
                             ].map((metric, idx) => (
-                                <div key={idx} className="bg-slate-900 border border-slate-800 rounded-xl p-6 relative overflow-hidden">
+                                <div key={idx} className="glass-card rounded-xl p-6 relative overflow-hidden group hover:-translate-y-1">
                                     <div className={`absolute top-0 right-0 p-4 opacity-10 text-${metric.color}-500`}>
                                         <svg className="w-16 h-16" fill="currentColor" viewBox="0 0 20 20"><path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z"></path><path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z"></path></svg>
                                     </div>
@@ -131,7 +213,7 @@ export default function EngineerDashboard() {
                         </div>
 
                         {/* Active Loops */}
-                        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+                        <div className="glass-panel rounded-xl p-6">
                             <div className="flex justify-between items-center mb-6">
                                 <h3 className="text-lg font-semibold text-white">🔄 Active Agent Loops</h3>
                                 <span className="px-2 py-1 bg-blue-500/10 text-blue-500 text-xs rounded border border-blue-500/20">Live</span>
@@ -169,7 +251,7 @@ export default function EngineerDashboard() {
 
                         <div className="grid gap-4">
                             {signals.map((signal) => (
-                                <div key={signal.id} className="bg-slate-900 border-l-4 border-slate-800 rounded-r-xl p-6 hover:bg-slate-800/50 transition-colors animate-in slide-in-from-left-2" style={{ borderLeftColor: signal.severity === 'critical' ? '#ef4444' : signal.severity === 'warning' ? '#f59e0b' : '#3b82f6' }}>
+                                <div key={signal.id} className="glass-card border-l-4 border-slate-700/50 rounded-r-xl p-6 hover:bg-slate-800/60 transition-colors animate-in slide-in-from-left-2" style={{ borderLeftColor: signal.severity === 'critical' ? '#ef4444' : signal.severity === 'warning' ? '#f59e0b' : '#3b82f6' }}>
                                     <div className="flex justify-between items-start mb-2">
                                         <div className="flex items-center gap-3">
                                             <span className="font-mono text-sm text-slate-500">{signal.id}</span>
@@ -214,8 +296,8 @@ export default function EngineerDashboard() {
                                     const criticalActions = reasoning.proposedActions.filter(a => a.requiresApproval);
 
                                     return (
-                                        <div key={ticket.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
-                                            <div className="p-6 border-b border-slate-800 bg-slate-900/50">
+                                        <div key={ticket.id} className="glass-card rounded-xl overflow-hidden shadow-xl border-slate-700/50">
+                                            <div className="p-6 border-b border-slate-700/50 bg-slate-900/30">
                                                 <div className="flex justify-between items-start">
                                                     <div>
                                                         <div className="flex items-center gap-2 mb-1">

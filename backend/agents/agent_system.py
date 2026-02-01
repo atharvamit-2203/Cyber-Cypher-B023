@@ -1,234 +1,177 @@
-"""Multi-agent system using LangGraph"""
-from typing import TypedDict, Annotated, List, Dict
+"""Unified Analyst Agent using LangGraph"""
+from typing import TypedDict, List, Dict
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.schema import HumanMessage, SystemMessage
-from .tools import tools
+from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import HumanMessage, SystemMessage
+from .tools import (
+    query_support_tickets,
+    check_api_logs,
+    detect_error_patterns,
+    get_merchant_migration_status,
+    send_merchant_notification,
+    escalate_to_engineer,
+    update_documentation,
+    check_payment_gateway_health
+)
 import json
+import time
 
+# LLM Configuration
+from config import settings
+
+if settings.llm_provider == "ollama":
+    llm = ChatOllama(
+        model=settings.ollama_model,
+        base_url=settings.ollama_base_url,
+        temperature=0.1,  # Lower temperature for faster, more predictable output
+        timeout=180,
+        num_predict=512,  # Limit output length for speed
+        num_ctx=2048      # Limit context window
+    )
+else:
+    llm = ChatOpenAI(temperature=0.7, model="gpt-4o-mini")
 
 class AgentState(TypedDict):
-    """State shared between agents"""
+    """State shared across the agent system"""
     signals: List[Dict]
-    patterns: List[Dict]
-    root_causes: List[Dict]
+    analysis: Dict
     recommended_actions: List[Dict]
-    confidence: float
-    risk_level: str
+    messages: List[Dict]
     requires_approval: bool
-    messages: List[dict]
+    scan_time_ms: float
 
-
-# Initialize LLM with LangSmith tracing (configured via environment variables)
-llm = ChatOpenAI(model="gpt-4-turbo-preview", temperature=0.3)
-
-
-def observer_agent(state: AgentState) -> AgentState:
-    """Observe signals from tickets, logs, and monitoring"""
+def analyst_agent(state: AgentState) -> AgentState:
+    """Unified agent that observes, reasons, and decides in one pass to save latency"""
+    print("\n   --- Analyst Node Started ---")
+    start_time = time.time()
+    
+    # 1. Collect Data (Tools are local and fast)
+    print("   🔍 Collecting signals from tools...")
+    tickets = query_support_tickets("checkout issues")
+    print("      -> Tickets collected")
+    logs = check_api_logs()
+    print("      -> Logs collected")
+    patterns = detect_error_patterns()
+    print("      -> Patterns collected")
+    print(f"   📊 Collected: {len(json.loads(tickets))} tickets, {len(json.loads(logs))} logs")
+    
+    # 2. Unified Reasoning Prompt
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are the Observer Agent. Your job is to gather signals from various sources:
-        - Support tickets
-        - API failure logs  
-        - Error patterns across merchants
-        
-        Use the available tools to collect data. Focus on:
-        1. Recent issues (last 24 hours)
-        2. Patterns affecting multiple merchants
-        3. Critical errors impacting revenue
-        
-        Return a summary of key signals detected."""),
-        ("human", "Scan for current issues and signals across the system."),
+        ("system", "Role: Cyber Analyst. Task: Analyze signals. Output: JSON ONLY. No text before/after. Fields: detected_signals, root_cause, confidence, actions (type, description, risk_level, requires_approval)."),
+        ("human", "TICKETS: {tickets}\nLOGS: {logs}\nPATTERNS: {patterns}\nOutput JSON:"),
     ])
     
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+    # Remove pretty printing from inputs to save tokens
+    tickets_compact = json.dumps(json.loads(tickets))
+    logs_compact = json.dumps(json.loads(logs))
+    patterns_compact = json.dumps(json.loads(patterns))
     
-    result = agent_executor.invoke({"input": "Scan for issues"})
+    chain = prompt | llm
     
-    # Parse signals from agent output
-    signals = [
-        {
-            "type": "support_tickets",
-            "data": result.get("output", ""),
-            "timestamp": "now"
+    try:
+        print(f"   🧠 Invoking LLM ({settings.ollama_model})...")
+        llm_start = time.time()
+        result = chain.invoke({
+            "tickets": tickets_compact,
+            "logs": logs_compact,
+            "patterns": patterns_compact
+        })
+        print(f"   📉 LLM Response received in {time.time() - llm_start:.2f}s")
+        
+        # Robust JSON extraction
+        content = result.content.strip()
+        
+        # Look for the first '{' and last '}'
+        start_idx = content.find('{')
+        end_idx = content.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1:
+            json_str = content[start_idx:end_idx+1]
+        else:
+            json_str = content
+
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as je:
+            print(f"   ⚠️ Initial JSON parse failed: {je}. Trying to clean content...")
+            # Fallback: simple cleanup of common LLM artifacts
+            json_str = json_str.replace("'", '"').replace('True', 'true').replace('False', 'false')
+            data = json.loads(json_str)
+            
+        print(f"   ✅ JSON parsed successfully")
+        
+        state["analysis"] = {
+            "root_cause": data.get("root_cause", "Unknown"),
+            "confidence": data.get("confidence", 0.5),
+            "summary": data.get("detected_signals", "")
         }
-    ]
-    
-    state["signals"] = signals
-    state["messages"] = state.get("messages", []) + [
-        {"role": "observer", "content": result.get("output", "")}
-    ]
-    
+        state["recommended_actions"] = data.get("actions", [])
+        state["requires_approval"] = any(a.get("requires_approval", False) for a in state["recommended_actions"])
+        state["messages"] = state.get("messages", []) + [
+            {"role": "analyst", "content": content}
+        ]
+    except Exception as e:
+        print(f"   ❌ Error in analyst agent: {e}")
+        print(f"   ❌ Raw Content that failed to parse: {result.content if 'result' in locals() else 'No result'}")
+        # Fallback state
+        state["analysis"] = {"root_cause": "Error parsing AI response", "confidence": 0.0}
+        state["recommended_actions"] = []
+        state["requires_approval"] = False
+        
+    state["scan_time_ms"] = (time.time() - start_time) * 1000
     return state
-
-
-def reasoner_agent(state: AgentState) -> AgentState:
-    """Analyze patterns and determine root causes"""
-    signals_summary = "\n".join([s.get("data", "") for s in state.get("signals", [])])
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are the Reasoner Agent. Analyze the signals from the Observer and:
-        1. Identify patterns (are multiple merchants affected?)
-        2. Determine root causes (why is this happening?)
-        3. Classify severity (low/medium/high/critical)
-        4. Assess confidence in your analysis (0-1 scale)
-        
-        Consider:
-        - Is this a known migration issue?
-        - Is it configuration vs code vs infrastructure?
-        - What's the business impact?
-        
-        Return JSON with: patterns, root_causes, confidence"""),
-        ("human", f"Analyze these signals:\n\n{signals_summary}"),
-    ])
-    
-    messages = prompt.format_messages()
-    result = llm.invoke(messages)
-    
-    # Extract reasoning
-    analysis = {
-        "patterns": ["webhook_signature_mismatch affecting 15 merchants in step 3"],
-        "root_causes": ["Migration step 3 docs show old webhook format"],
-        "confidence": 0.85,
-        "severity": "high"
-    }
-    
-    state["patterns"] = analysis["patterns"]
-    state["root_causes"] = analysis["root_causes"]
-    state["confidence"] = analysis["confidence"]
-    state["messages"] = state.get("messages", []) + [
-        {"role": "reasoner", "content": result.content}
-    ]
-    
-    return state
-
-
-def decision_maker_agent(state: AgentState) -> AgentState:
-    """Decide what actions to take based on analysis"""
-    root_causes_summary = "\n".join(state.get("root_causes", []))
-    confidence = state.get("confidence", 0.0)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are the Decision Maker Agent. Based on the root cause analysis:
-        1. Determine appropriate actions
-        2. Assess risk level of each action (low/medium/high)
-        3. Decide if human approval is needed
-        
-        Decision rules:
-        - Confidence > 0.9 AND Risk = low → Auto-execute
-        - Confidence > 0.7 AND Risk = medium → Recommend (need approval)
-        - Risk = high OR Confidence < 0.7 → Escalate to engineer
-        
-        Available actions:
-        - Send documentation to merchant
-        - Update docs
-        - Escalate to engineer
-        - Switch to backup gateway
-        
-        Return JSON with: actions, risk_level, requires_approval, reasoning"""),
-        ("human", f"Root causes:\n{root_causes_summary}\n\nConfidence: {confidence}"),
-    ])
-    
-    messages = prompt.format_messages()
-    result = llm.invoke(messages)
-    
-    # Determine action
-    if confidence > 0.9:
-        actions = [{
-            "type": "send_docs",
-            "description": "Send updated webhook documentation to affected merchants",
-            "risk": "low",
-            "auto_execute": True
-        }]
-        risk_level = "low"
-        requires_approval = False
-    elif confidence > 0.7:
-        actions = [{
-            "type": "switch_gateway",
-            "description": "Switch to backup payment gateway",
-            "risk": "medium",
-            "auto_execute": False
-        }]
-        risk_level = "medium"
-        requires_approval = True
-    else:
-        actions = [{
-            "type": "escalate",
-            "description": "Escalate to engineer - uncertain root cause",
-            "risk": "high",
-            "auto_execute": False
-        }]
-        risk_level = "high"
-        requires_approval = True
-    
-    state["recommended_actions"] = actions
-    state["risk_level"] = risk_level
-    state["requires_approval"] = requires_approval
-    state["messages"] = state.get("messages", []) + [
-        {"role": "decision_maker", "content": result.content}
-    ]
-    
-    return state
-
 
 def executor_agent(state: AgentState) -> AgentState:
-    """Execute approved actions"""
+    """Execute non-blocking or approved actions"""
     actions = state.get("recommended_actions", [])
     
     for action in actions:
-        if action.get("auto_execute"):
-            # Execute using tools
+        # Only execute if it DOES NOT require approval
+        if not action.get("requires_approval", False):
             if action["type"] == "send_docs":
-                # Use the send_merchant_notification tool
-                prompt = ChatPromptTemplate.from_messages([
-                    ("system", "You are the Executor Agent. Execute the approved action using available tools."),
-                    ("human", f"Execute this action: {action['description']}"),
-                ])
-                
-                agent = create_openai_tools_agent(llm, tools, prompt)
-                agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-                
-                result = agent_executor.invoke({"input": action['description']})
-                
-                state["messages"] = state.get("messages", []) + [
-                    {"role": "executor", "content": f"Executed: {result.get('output', '')}"}
-                ]
+                send_merchant_notification(
+                    merchant_id="merchant_1",
+                    message=action["description"]
+                )
+            elif action["type"] == "escalate":
+                escalate_to_engineer(
+                    issue_summary=action["description"],
+                    severity="high",
+                    recommended_action="Manual review needed"
+                )
+            
+            state["messages"] = state.get("messages", []) + [
+                {"role": "executor", "content": f"Executed: {action['description']}"}
+            ]
     
     return state
 
-
-def should_execute_or_wait(state: AgentState) -> str:
-    """Conditional edge: execute or wait for approval"""
-    if state.get("requires_approval"):
-        return "wait_approval"
-    else:
-        return "execute"
-
+def should_wait_for_approval(state: AgentState) -> str:
+    """Router to determine if we should stop for human approval"""
+    if state.get("requires_approval", False):
+        return "end"
+    return "continue"
 
 # Build the agent graph
 def create_agent_graph():
+    """Create the optimized one-pass agent system"""
     workflow = StateGraph(AgentState)
     
     # Add nodes
-    workflow.add_node("observer", observer_agent)
-    workflow.add_node("reasoner", reasoner_agent)
-    workflow.add_node("decision_maker", decision_maker_agent)
+    workflow.add_node("analyst", analyst_agent)
     workflow.add_node("executor", executor_agent)
     
     # Add edges
-    workflow.set_entry_point("observer")
-    workflow.add_edge("observer", "reasoner")
-    workflow.add_edge("reasoner", "decision_maker")
+    workflow.set_entry_point("analyst")
     
-    # Conditional edge
     workflow.add_conditional_edges(
-        "decision_maker",
-        should_execute_or_wait,
+        "analyst",
+        should_wait_for_approval,
         {
-            "execute": "executor",
-            "wait_approval": END
+            "continue": "executor",
+            "end": END
         }
     )
     
@@ -236,6 +179,19 @@ def create_agent_graph():
     
     return workflow.compile()
 
-
-# Create the agent system
+# Create the compiled graph
 agent_graph = create_agent_graph()
+
+def run_agent_system() -> Dict:
+    """Run the optimized multi-agent system"""
+    initial_state = {
+        "signals": [],
+        "analysis": {},
+        "recommended_actions": [],
+        "messages": [],
+        "requires_approval": False,
+        "scan_time_ms": 0.0
+    }
+    
+    result = agent_graph.invoke(initial_state)
+    return result

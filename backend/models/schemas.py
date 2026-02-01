@@ -4,14 +4,15 @@ from datetime import datetime
 
 
 class Issue(BaseModel):
-    id: str
-    type: Literal['api', 'webhook', 'payment', 'inventory', 'checkout']
-    severity: Literal['low', 'medium', 'high', 'critical']
-    title: str
+    id: Optional[str] = None
+    merchant_id: Optional[str] = None
+    type: Literal['api', 'webhook', 'payment', 'inventory', 'checkout', 'ticket']
+    severity: Optional[Literal['low', 'medium', 'high', 'critical']] = 'medium'
+    title: Optional[str] = "Detected Issue"
     description: str
-    affected_count: int
-    detected_at: datetime
-    status: Literal['detected', 'analyzing', 'resolved']
+    affected_count: Optional[int] = 1
+    detected_at: Optional[datetime] = None
+    status: Optional[Literal['detected', 'analyzing', 'resolved']] = 'detected'
 
 
 class Merchant(BaseModel):

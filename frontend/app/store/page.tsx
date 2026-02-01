@@ -4,6 +4,8 @@ import React, { useState, useEffect } from 'react';
 import Chatbot from '../components/Chatbot';
 import { mockProducts, Product } from '../lib/mock-data';
 import { triggerFailure, FailureScenario, initializeSimulation } from '../lib/simulation-store';
+import { api } from '../lib/api';
+import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 
 export default function Storefront() {
@@ -15,11 +17,12 @@ export default function Storefront() {
     // Dev Controls State
     const [showDevControls, setShowDevControls] = useState(false);
     const [selectedScenario, setSelectedScenario] = useState<FailureScenario>('NONE');
+    const router = useRouter();
 
     useEffect(() => {
         initializeSimulation();
-        // Simulate initial load
-        setProducts(mockProducts);
+        // Use executeAction for initial load to ensure AI monitoring
+        executeAction('LOAD');
     }, []);
 
     // Handle Scenario Triggers
@@ -50,14 +53,43 @@ export default function Storefront() {
         if (failureOccurred) {
             setActiveScenario(currentScenario);
             triggerFailure(currentScenario, { itemId: item?.id });
+
+            // Report real failure to Python Backend if connected
+            try {
+                const scenarioTypeMap: Record<string, string> = {
+                    'AUTH_FAILURE_API': 'api',
+                    'INVENTORY_MISMATCH': 'inventory',
+                    'CART_SYNC_FAILURE': 'webhook',
+                    'CHECKOUT_GATEWAY_TIMEOUT': 'checkout'
+                };
+
+                api.simulateIssue({
+                    merchant_id: "Fashion Hub",
+                    type: (scenarioTypeMap[currentScenario] || 'api') as any,
+                    description: `Migration Anomaly: Customer encountered ${currentScenario.replace(/_/g, ' ')} during ${action} for product ${item?.name || 'Catalog'}. High risk of churn.`
+                }).then(() => {
+                    // Trigger immediate AI scan for the demo
+                    api.triggerAgentScan();
+                });
+            } catch (e) {
+                console.warn("Backend not reachable, staying in pure simulation mode.");
+            }
         } else {
             // Success path
+            if (action === 'LOAD') {
+                setProducts(mockProducts);
+            }
+            if (action === 'ADD_TO_CART' && item) {
+                setCart([...cart, item]);
+            }
             if (action === 'ADD_TO_CART' && item) {
                 setCart([...cart, item]);
             }
             if (action === 'CHECKOUT') {
-                alert('Order placed successfully! (Simulation)');
-                setCart([]);
+                // Save cart to sessionStorage for the checkout page
+                sessionStorage.setItem('cyber_cart', JSON.stringify(cart));
+                sessionStorage.setItem('active_scenario', selectedScenario);
+                router.push('/checkout');
             }
             setActiveScenario('NONE');
         }
@@ -66,7 +98,7 @@ export default function Storefront() {
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
     return (
-        <div className="min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-indigo-100 pb-20">
+        <div className="min-h-screen text-slate-100 font-sans selection:bg-indigo-500/30 pb-20">
 
             {/* Dev Controls (Hidden Toggle) */}
             <div className="fixed top-4 left-4 z-50">
@@ -109,14 +141,14 @@ export default function Storefront() {
             </div>
 
             {/* Navigation */}
-            <nav className="bg-white sticky top-0 z-40 border-b border-slate-200 shadow-sm">
+            <nav className="sticky top-0 z-40 glass-panel border-b-0">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                     <div className="flex justify-between items-center h-16">
                         <div className="flex items-center gap-8">
-                            <div className="text-2xl font-black italic tracking-tighter text-slate-900">CYBER<span className="text-indigo-600">STORE</span></div>
-                            <div className="hidden md:flex gap-6 text-sm font-medium text-slate-500">
-                                <a href="#" className="text-slate-900">New Arrivals</a>
-                                <a href="#" className="hover:text-slate-900">Electronics</a>
+                            <div className="text-2xl font-black italic tracking-tighter text-white">CYBER<span className="text-indigo-500">STORE</span></div>
+                            <div className="hidden md:flex gap-6 text-sm font-medium text-slate-400">
+                                <a href="#" className="text-slate-200 hover:text-white">New Arrivals</a>
+                                <a href="#" className="hover:text-white">Electronics</a>
                                 <a href="#" className="hover:text-slate-900">Wearables</a>
                             </div>
                         </div>
@@ -139,7 +171,7 @@ export default function Storefront() {
 
             <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 {/* Hero Section */}
-                <div className="mb-12 rounded-3xl bg-slate-900 overflow-hidden relative min-h-[300px] flex items-center">
+                <div className="mb-12 rounded-3xl overflow-hidden relative min-h-[300px] flex items-center glass-card border-none">
                     <div className="absolute inset-0 bg-gradient-to-r from-indigo-600/20 to-purple-600/20" />
                     <div className="relative z-10 p-12 max-w-2xl">
                         <span className="text-indigo-400 font-bold tracking-wider text-sm uppercase mb-2 block">Migration Special</span>
@@ -166,8 +198,8 @@ export default function Storefront() {
                 ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
                         {products.map((product) => (
-                            <div key={product.id} className="group bg-white rounded-2xl p-4 border border-slate-100 hover:border-indigo-100 hover:shadow-xl hover:shadow-indigo-900/5 transition-all duration-300">
-                                <div className="aspect-square bg-slate-50 rounded-xl mb-4 flex items-center justify-center text-6xl group-hover:scale-105 transition-transform duration-500 relative overflow-hidden">
+                            <div key={product.id} className="group glass-card rounded-2xl p-4 hover:bg-slate-800/60 transition-all duration-300">
+                                <div className="aspect-square bg-slate-900/40 rounded-xl mb-4 flex items-center justify-center text-6xl group-hover:scale-105 transition-transform duration-500 relative overflow-hidden">
                                     {product.image}
                                     <button
                                         onClick={() => executeAction('ADD_TO_CART', product)}
@@ -178,13 +210,13 @@ export default function Storefront() {
                                 </div>
                                 <div>
                                     <div className="flex justify-between items-start mb-2">
-                                        <h3 className="font-bold text-slate-900 truncate pr-2">{product.name}</h3>
-                                        <span className="font-bold text-slate-900">₹{product.price.toLocaleString('en-IN')}</span>
+                                        <h3 className="font-bold text-slate-100 truncate pr-2">{product.name}</h3>
+                                        <span className="font-bold text-indigo-400">₹{product.price.toLocaleString('en-IN')}</span>
                                     </div>
                                     <p className="text-xs text-slate-500 line-clamp-2 h-8 leading-relaxed mb-4">{product.description}</p>
                                     <div className="flex gap-2">
                                         {product.tags.map(tag => (
-                                            <span key={tag} className="text-[10px] uppercase font-bold text-slate-400 bg-slate-50 px-2 py-1 rounded-md tracking-wide">{tag}</span>
+                                            <span key={tag} className="text-[10px] uppercase font-bold text-slate-400 bg-slate-800/50 px-2 py-1 rounded-md tracking-wide">{tag}</span>
                                         ))}
                                     </div>
                                 </div>

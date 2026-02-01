@@ -1,5 +1,5 @@
 """Agent tools for monitoring and taking actions"""
-from langchain.tools import Tool
+from langchain_core.tools import Tool
 from typing import List, Dict
 import json
 from datetime import datetime, timedelta
@@ -7,54 +7,36 @@ import random
 
 
 # Mock data storage (in production, use real database)
-MOCK_TICKETS = []
-MOCK_API_LOGS = []
+MOCK_TICKETS = [
+    {
+        "id": "TICK-001",
+        "merchant": "Fashion Hub",
+        "issue": "Checkout not working after migration",
+        "priority": "critical",
+        "created_at": datetime.now().isoformat()
+    }
+]
+MOCK_API_LOGS = [
+    {
+        "merchant": "Fashion Hub",
+        "endpoint": "/checkout/create",
+        "status": 400,
+        "error": "webhook_signature_invalid",
+        "count": 5,
+        "timestamp": datetime.now().isoformat()
+    }
+]
 MOCK_MERCHANTS = {}
 
 
-def query_support_tickets(query: str) -> str:
+def query_support_tickets(query: str = "") -> str:
     """Query support tickets database for patterns"""
-    # Simulate ticket search
-    tickets = [
-        {
-            "id": "TICK-001",
-            "merchant": "Fashion Hub",
-            "issue": "Checkout not working after migration",
-            "priority": "critical",
-            "created_at": datetime.now().isoformat()
-        },
-        {
-            "id": "TICK-002",
-            "merchant": "Fashion Hub",
-            "issue": "Payment gateway timeout",
-            "priority": "high",
-            "created_at": datetime.now().isoformat()
-        }
-    ]
-    return json.dumps(tickets, indent=2)
+    return json.dumps(MOCK_TICKETS, indent=2)
 
 
 def check_api_logs(merchant_id: str = None, last_minutes: int = 60) -> str:
     """Check API failure logs"""
-    logs = [
-        {
-            "merchant": "Fashion Hub",
-            "endpoint": "/checkout/create",
-            "status": 400,
-            "error": "webhook_signature_invalid",
-            "count": 15,
-            "timestamp": datetime.now().isoformat()
-        },
-        {
-            "merchant": "Fashion Hub",
-            "endpoint": "/payments/process",
-            "status": 504,
-            "error": "gateway_timeout",
-            "count": 12,
-            "timestamp": datetime.now().isoformat()
-        }
-    ]
-    return json.dumps(logs, indent=2)
+    return json.dumps(MOCK_API_LOGS, indent=2)
 
 
 def detect_error_patterns(time_window_hours: int = 24) -> str:
